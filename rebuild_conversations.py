@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Antigravity Conversation Fix  (v1.05)
 =============================
@@ -13,7 +14,7 @@ Fixes:
 
 Usage:
   1. CLOSE Antigravity completely (File > Exit, or kill from Task Manager)
-  2. Run this script (or use run.bat)
+  2. Run this script (or use run.bat on Windows)
   3. REBOOT your PC (full restart, not just app restart)
   4. Open Antigravity — your conversations should appear, sorted by date
 
@@ -21,12 +22,38 @@ Requirements: Python 3.7+ (no external packages needed)
 License: MIT
 """
 
+# ─── Python Version Guard ────────────────────────────────────────────────────
+# If accidentally launched with Python 2 (e.g. `python` points to 2.x on
+# legacy systems), automatically re-exec with python3 instead of crashing
+# with syntax errors.  If python3 isn't available either, give a clear message.
+import sys
+import os
+
+if sys.version_info[0] < 3:
+    try:
+        sys.stdout.flush()
+        os.execvp("python3", ["python3"] + sys.argv)
+    except OSError:
+        sys.stderr.write(
+            "ERROR: This script requires Python 3.7+.\n"
+            "       'python' on this system is Python {}.{}, and 'python3' was not found.\n"
+            "       Please install Python 3: https://www.python.org/downloads/\n"
+            .format(sys.version_info[0], sys.version_info[1])
+        )
+        sys.exit(1)
+
+if sys.version_info < (3, 7):
+    sys.stderr.write(
+        "ERROR: This script requires Python 3.7+, but you are running Python {}.{}.\n"
+        "       Please upgrade: https://www.python.org/downloads/\n"
+        .format(sys.version_info[0], sys.version_info[1])
+    )
+    sys.exit(1)
+
 import sqlite3
 import base64
 import json
-import os
 import re
-import sys
 import time
 import subprocess
 import platform
@@ -38,6 +65,69 @@ from urllib.parse import quote, unquote
 # works on both old and new installations.
 
 _SYSTEM = platform.system()
+_ANTIGRAVITY_NAMES = ("Antigravity IDE", "antigravity", "Antigravity")
+
+
+def _is_wsl():
+    """Detect if running inside Windows Subsystem for Linux."""
+    if _SYSTEM != "Linux":
+        return False
+    if "microsoft" in platform.release().lower():
+        return True
+    try:
+        with open("/proc/version", "r") as f:
+            if "microsoft" in f.read().lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+_IS_WSL = _is_wsl()
+
+
+def _get_wsl_windows_appdata():
+    """
+    Resolve the Windows %APPDATA% path from inside WSL.
+    Strategy 1: Ask Windows directly via cmd.exe and convert with wslpath.
+    Strategy 2: Scan /mnt/c/Users/ for folders that have Antigravity installed.
+    Returns a WSL-accessible path string, or None if resolution fails.
+    """
+    # Strategy 1: cmd.exe %APPDATA% → wslpath
+    try:
+        proc = subprocess.run(
+            ['cmd.exe', '/c', 'echo %APPDATA%'],
+            capture_output=True, text=True, check=True
+        )
+        win_path = proc.stdout.strip()
+        if win_path and win_path != "%APPDATA%":
+            proc_wsl = subprocess.run(
+                ['wslpath', win_path],
+                capture_output=True, text=True, check=True
+            )
+            wsl_path = proc_wsl.stdout.strip()
+            if os.path.exists(wsl_path):
+                return wsl_path
+    except Exception:
+        pass
+
+    # Strategy 2: Scan /mnt/c/Users/ for user folders that have Antigravity
+    if os.path.exists("/mnt/c/Users"):
+        _skip = {"Default", "Default User", "All Users", "desktop.ini", "Public"}
+        try:
+            for user in os.listdir("/mnt/c/Users"):
+                if user in _skip:
+                    continue
+                appdata = os.path.join("/mnt/c/Users", user, "AppData", "Roaming")
+                if not os.path.exists(appdata):
+                    continue
+                for name in _ANTIGRAVITY_NAMES:
+                    if os.path.exists(os.path.join(appdata, name)):
+                        return appdata
+        except Exception:
+            pass
+
+    return None
 
 
 def _first_existing(*candidates):
@@ -65,6 +155,31 @@ if _SYSTEM == "Windows":
     WORKSPACE_STORAGE_DIR = _first_existing(
         os.path.join(_appdata, "Antigravity IDE", "User", "workspaceStorage"),
         os.path.join(_appdata, "antigravity", "User", "workspaceStorage"),
+    )
+elif _IS_WSL:
+    _wsl_appdata = _get_wsl_windows_appdata()
+    _home = os.path.expanduser("~")
+
+    if _wsl_appdata:
+        DB_PATH = _first_existing(
+            os.path.join(_wsl_appdata, "Antigravity IDE", "User", "globalStorage", "state.vscdb"),
+            os.path.join(_wsl_appdata, "antigravity", "User", "globalStorage", "state.vscdb"),
+            os.path.join(_wsl_appdata, "Antigravity", "User", "globalStorage", "state.vscdb"),
+        )
+        WORKSPACE_STORAGE_DIR = _first_existing(
+            os.path.join(_wsl_appdata, "Antigravity IDE", "User", "workspaceStorage"),
+            os.path.join(_wsl_appdata, "antigravity", "User", "workspaceStorage"),
+            os.path.join(_wsl_appdata, "Antigravity", "User", "workspaceStorage"),
+        )
+    else:
+        DB_PATH = ""
+        WORKSPACE_STORAGE_DIR = ""
+
+    CONVERSATIONS_DIR = _first_existing(
+        os.path.join(_home, ".gemini", "antigravity", "conversations"),
+    )
+    BRAIN_DIR = _first_existing(
+        os.path.join(_home, ".gemini", "antigravity", "brain"),
     )
 elif _SYSTEM == "Darwin":  # macOS
     _home = os.path.expanduser("~")
@@ -198,10 +313,19 @@ def path_to_workspace_uri(folder_path):
     Passes through remote URIs (vscode-remote://, file:///) unchanged.
     Uses raw paths (no URL-encoding) for clean display in Antigravity's sidebar.
     Example: D:\\Repos\\My Project  →  file:///d:/Repos/My Project
+    WSL:     /mnt/c/Users/name/Project → file:///c:/Users/name/Project
     """
     # Pass through URIs that are already in the correct format
     if _is_remote_uri(folder_path):
         return folder_path
+
+    # WSL: convert /mnt/<drive>/... to file:///<drive>:/...
+    if _IS_WSL and folder_path.startswith("/mnt/"):
+        parts = folder_path.split("/")
+        if len(parts) >= 3 and len(parts[2]) == 1:
+            drive = parts[2].lower()
+            rest = "/".join(parts[3:])
+            return f"file:///{drive}:/{rest}"
 
     p = folder_path.replace("\\", "/")
     if len(p) >= 2 and p[1] == ":":
@@ -303,6 +427,7 @@ def _uri_to_local_path(file_uri):
     """
     Convert a file:/// URI to a local filesystem path.
     Handles URL-encoding (e.g. %20 -> space, %3A -> colon).
+    On WSL, converts file:///C:/... to /mnt/c/...
     Returns None for non-file URIs.
     """
     if not file_uri.startswith("file:///"):
@@ -311,6 +436,10 @@ def _uri_to_local_path(file_uri):
     # On Windows, file:///C:/... -> C:/...
     if _SYSTEM == "Windows" and len(raw) >= 3 and raw[0] == '/' and raw[2] == ':':
         raw = raw[1:]  # strip leading /
+    # On WSL, file:///C:/... -> /mnt/c/...
+    elif _IS_WSL and len(raw) >= 3 and raw[0] == '/' and raw[2] == ':':
+        drive = raw[1].lower()
+        raw = f"/mnt/{drive}{raw[3:]}"
     return raw
 
 
@@ -390,10 +519,19 @@ def infer_workspace_from_brain(conversation_id, known_ws_uris=None):
         raw = file_uri[len("file:///"):]
         raw = raw.replace("%3A", ":").replace("%3a", ":")
         raw = raw.replace("%20", " ")
+
+        # WSL: normalize Windows drive letters in URIs to /mnt/ paths
+        if _IS_WSL and len(raw) >= 2 and raw[1] == ':':
+            drive = raw[0].lower()
+            raw = f"mnt/{drive}/{raw[3:]}"
+
         parts = raw.replace("\\", "/").split("/")
         # On Windows paths like C:/Users/name/Desktop/Project → 5 segments.
+        # On WSL paths like mnt/c/Users/name/Project → 5 segments.
         # On Linux/Mac like home/user/projects/Project → 4 segments + re-add /.
         if _SYSTEM == "Windows":
+            depth = 5
+        elif _IS_WSL and raw.startswith("mnt/"):
             depth = 5
         else:
             depth = 4
@@ -728,8 +866,9 @@ def main():
     print("=" * 62)
     print()
 
-    # ── Check if Antigravity is running (Windows only) ────────────────────
+    # ── Check if Antigravity is running ────────────────────────────────────
 
+    _ag_running = False
     if _SYSTEM == "Windows":
         try:
             result = subprocess.run(
@@ -737,17 +876,30 @@ def main():
                 capture_output=True, text=True, creationflags=0x08000000
             )
             if 'antigravity.exe' in result.stdout.lower():
-                print("  WARNING: Antigravity is still running!")
-                print()
-                print("  The fix will NOT work correctly while Antigravity is open.")
-                print("  Please close it first: File > Exit, or kill from Task Manager.")
-                print()
-                choice = input("  Close Antigravity and press Enter to continue (or type Q to quit): ")
-                if choice.strip().lower() == 'q':
-                    return 1
-                print()
+                _ag_running = True
         except Exception:
             pass
+    elif _IS_WSL:
+        # Check the Windows host process first, then Linux processes
+        try:
+            result = subprocess.run(
+                ['tasklist.exe', '/FI', 'IMAGENAME eq antigravity.exe'],
+                capture_output=True, text=True
+            )
+            if 'antigravity.exe' in result.stdout.lower():
+                _ag_running = True
+        except Exception:
+            pass
+        if not _ag_running:
+            try:
+                result = subprocess.run(
+                    ['pgrep', '-f', 'antigravity'],
+                    capture_output=True, text=True
+                )
+                if result.stdout.strip():
+                    _ag_running = True
+            except Exception:
+                pass
     else:
         # Linux / macOS: check for antigravity process
         try:
@@ -756,15 +908,20 @@ def main():
                 capture_output=True, text=True
             )
             if result.stdout.strip():
-                print("  WARNING: Antigravity may still be running!")
-                print("  Please close it before proceeding.")
-                print()
-                choice = input("  Press Enter to continue anyway (or type Q to quit): ")
-                if choice.strip().lower() == 'q':
-                    return 1
-                print()
+                _ag_running = True
         except Exception:
             pass
+
+    if _ag_running:
+        print("  WARNING: Antigravity may still be running!")
+        print()
+        print("  The fix will NOT work correctly while Antigravity is open.")
+        print("  Please close it first: File > Exit, or kill it.")
+        print()
+        choice = input("  Press Enter to continue anyway (or type Q to quit): ")
+        if choice.strip().lower() == 'q':
+            return 1
+        print()
 
     # ── Validate paths ──────────────────────────────────────────────────────
 
@@ -957,9 +1114,13 @@ def main():
     print("  " + "=" * 58)
     print()
     print("  NEXT STEPS:")
-    print("    1. Make sure Antigravity is fully closed")
-    print("    2. REBOOT your PC (full restart, not just app restart)")
-    print("    3. Open Antigravity — conversations should appear sorted by date")
+    if _IS_WSL:
+        print("    1. Make sure Antigravity is fully closed on the Windows side")
+        print("    2. Open Antigravity — conversations should appear sorted by date")
+    else:
+        print("    1. Make sure Antigravity is fully closed")
+        print("    2. REBOOT your PC (full restart, not just app restart)")
+        print("    3. Open Antigravity — conversations should appear sorted by date")
     print()
     input("  Press Enter to close...")
     return 0

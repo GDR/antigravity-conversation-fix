@@ -28,6 +28,8 @@ Your Antigravity conversation history disappeared? Conversations showing in the 
 | Missing timestamps causing wrong sort | ✅ Injects timestamps from file dates *(v1.03+)* |
 | Remote workspaces (WSL/SSH/Docker) not recognized | ✅ Full `vscode-remote://` support *(v1.04+)* |
 | "Antigravity IDE" renamed folder not detected | ✅ Auto-detects both old and new paths *(v1.05+)* |
+| Running from WSL requires manual file copying | ✅ Native WSL path detection *(v1.05+)* |
+| `python` command fails on macOS/Linux | ✅ Auto-detects Python 3, with built-in fallback *(v1.05+)* |
 
 ## How It Works
 
@@ -41,6 +43,7 @@ Antigravity stores conversation data in two places:
 | Windows | `%USERPROFILE%\.gemini\antigravity\conversations\` | `%APPDATA%\Antigravity IDE\...\state.vscdb` |
 | macOS | `~/.gemini/antigravity/conversations/` | `~/Library/Application Support/Antigravity IDE/.../state.vscdb` |
 | Linux | `~/.gemini/antigravity/conversations/` | `~/.config/Antigravity IDE/.../state.vscdb` |
+| WSL | `~/.gemini/antigravity/conversations/` | Auto-resolved from Windows `%APPDATA%` via `/mnt/c/` |
 
 > **Note:** The tool automatically detects both the old folder name (`Antigravity` / `antigravity`) and the new name (`Antigravity IDE`). No manual path changes needed.
 
@@ -65,7 +68,10 @@ When the index gets corrupted, conversations still exist on disk but don't show 
 ### v1.05
 - **New:** **Antigravity IDE path support** — automatically detects both the old (`Antigravity`) and new (`Antigravity IDE`) folder names across Windows, macOS, and Linux. No manual configuration needed — the tool finds whichever version you have installed.
 - **New:** **Smarter workspace matching** — uses Antigravity's own `workspaceStorage` data to accurately match conversations to workspaces, instead of relying solely on path-depth heuristics. Falls back to the old method if no workspace storage data is found.
+- **New:** **Native WSL support** — the script now auto-detects WSL and resolves Windows `%APPDATA%` paths directly via `cmd.exe` and `wslpath`. No manual file copying needed — just run the `.py` script from your WSL terminal. Falls back to scanning `/mnt/c/Users/` for Antigravity installations if the primary method fails.
+- **New:** **Python 3 auto-fallback** — if accidentally launched with Python 2, the script auto-relaunches itself with `python3`. Also validates minimum version (3.7+) with clear error messages and install instructions.
 - **Fix:** Title resolution now correctly preserves canonical Antigravity titles from the database, only using brain artifact headings for conversations that have no existing title.
+- **Fix:** WSL process detection now checks both the Windows host (`tasklist.exe`) and Linux processes (`pgrep`).
 
 ### v1.04
 - **New:** **Remote workspace support** — now correctly handles `vscode-remote://` URIs for WSL, SSH, and Docker workspaces. Remote paths are detected during auto-assignment and accepted during manual assignment without local filesystem validation.
@@ -92,20 +98,30 @@ When the index gets corrupted, conversations still exist on disk but don't show 
 If you prefer running the Python script directly, or if you are on **Mac** or **Linux** (which cannot run `.exe` files):
 
 ```bash
+# Windows
 python rebuild_conversations.py
+
+# macOS / Linux
+python3 rebuild_conversations.py
 ```
+
+> **Why `python3`?** On macOS 12.3+ and most Linux distros, the `python` command either doesn't exist or may point to an old Python 2 installation. Use `python3` to be safe. If you're unsure which you have, run `python3 --version` in your terminal.
+
+> **Automatic fallback:** If you accidentally run the script with Python 2 (e.g. `python rebuild_conversations.py` on a system where `python` is Python 2), the script will detect this and automatically re-launch itself with `python3`. If Python 3 isn't installed at all, it will print a clear error with install instructions.
 
 Requires Python 3.7+ with no external packages. The script automatically detects your operating system and finds the correct folders (both old and new naming conventions).
 
 ### WSL Users
 
-If your conversations are stored inside WSL but Antigravity runs on Windows, copy your files to the Windows profile first:
+The script natively supports WSL — just run it directly from your WSL terminal:
 
-1. Copy `\\wsl.localhost\<distro>\home\<user>\.gemini\antigravity\conversations\*.pb` → `%USERPROFILE%\.gemini\antigravity\conversations\`
-2. Copy `\\wsl.localhost\<distro>\home\<user>\.gemini\antigravity\brain\` → `%USERPROFILE%\.gemini\antigravity\brain\`
-3. Run the fix tool as normal on Windows
+```bash
+python3 rebuild_conversations.py
+```
 
-The `vscode-remote://` workspace detection will still work correctly for your WSL workspaces.
+The tool automatically detects WSL, resolves your Windows `%APPDATA%` path, and accesses the Antigravity database on the Windows side. No manual file copying needed.
+
+> **How it works:** The script calls `cmd.exe /c echo %APPDATA%` and converts the result with `wslpath`. If that fails, it scans `/mnt/c/Users/` for folders that have Antigravity installed. Conversations and brain data are read from your Linux home directory (`~/.gemini/antigravity/`).
 
 ## Safety
 
@@ -131,7 +147,7 @@ A: The tool will detect if Antigravity is running and warn you. It's recommended
 A: Yes! v1.03+ can auto-recover most workspace assignments by scanning your brain artifact files. When prompted, press Enter or 1 for auto-assignment. If some conversations can't be auto-detected, choose option 2 to manually assign them.
 
 **Q: I use WSL / SSH / Docker remote workspaces. Will this work?**
-A: Yes! v1.04+ fully supports `vscode-remote://` URIs. The tool auto-detects remote workspace paths from your brain artifacts and accepts them during manual assignment.
+A: Yes! v1.04+ fully supports `vscode-remote://` URIs. v1.05+ also supports running the script natively from inside WSL — no file copying needed.
 
 **Q: I updated Antigravity and the folder changed from "Antigravity" to "Antigravity IDE". Will the tool still work?**
 A: Yes! v1.05+ automatically detects both folder names and uses whichever one exists on your system.
