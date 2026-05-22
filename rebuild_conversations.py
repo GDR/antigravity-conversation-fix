@@ -141,23 +141,34 @@ def _first_existing(*candidates):
 if _SYSTEM == "Windows":
     _appdata = os.path.expandvars(r"%APPDATA%")
     _profile = os.path.expandvars(r"%USERPROFILE%")
+    _gemini = os.path.join(_profile, ".gemini")
 
     DB_PATH = _first_existing(
         os.path.join(_appdata, "Antigravity IDE", "User", "globalStorage", "state.vscdb"),
         os.path.join(_appdata, "antigravity", "User", "globalStorage", "state.vscdb"),
     )
     CONVERSATIONS_DIR = _first_existing(
-        os.path.join(_profile, ".gemini", "antigravity-ide", "conversations"),
-        os.path.join(_profile, ".gemini", "antigravity", "conversations"),
+        os.path.join(_gemini, "antigravity-ide", "conversations"),
+        os.path.join(_gemini, "antigravity", "conversations"),
     )
     BRAIN_DIR = _first_existing(
-        os.path.join(_profile, ".gemini", "antigravity-ide", "brain"),
-        os.path.join(_profile, ".gemini", "antigravity", "brain"),
+        os.path.join(_gemini, "antigravity-ide", "brain"),
+        os.path.join(_gemini, "antigravity", "brain"),
     )
     WORKSPACE_STORAGE_DIR = _first_existing(
         os.path.join(_appdata, "Antigravity IDE", "User", "workspaceStorage"),
         os.path.join(_appdata, "antigravity", "User", "workspaceStorage"),
     )
+    _ALL_CONV_DIRS = [
+        os.path.join(_gemini, "antigravity-ide", "conversations"),
+        os.path.join(_gemini, "antigravity", "conversations"),
+        os.path.join(_gemini, "antigravity-backup", "conversations"),
+    ]
+    _ALL_BRAIN_DIRS = [
+        os.path.join(_gemini, "antigravity-ide", "brain"),
+        os.path.join(_gemini, "antigravity", "brain"),
+        os.path.join(_gemini, "antigravity-backup", "brain"),
+    ]
 elif _IS_WSL:
     _wsl_appdata = _get_wsl_windows_appdata()
     _home = os.path.expanduser("~")
@@ -185,6 +196,17 @@ elif _IS_WSL:
         os.path.join(_home, ".gemini", "antigravity-ide", "brain"),
         os.path.join(_home, ".gemini", "antigravity", "brain"),
     )
+    _gemini_wsl = os.path.join(_home, ".gemini")
+    _ALL_CONV_DIRS = [
+        os.path.join(_gemini_wsl, "antigravity-ide", "conversations"),
+        os.path.join(_gemini_wsl, "antigravity", "conversations"),
+        os.path.join(_gemini_wsl, "antigravity-backup", "conversations"),
+    ]
+    _ALL_BRAIN_DIRS = [
+        os.path.join(_gemini_wsl, "antigravity-ide", "brain"),
+        os.path.join(_gemini_wsl, "antigravity", "brain"),
+        os.path.join(_gemini_wsl, "antigravity-backup", "brain"),
+    ]
 elif _SYSTEM == "Darwin":  # macOS
     _home = os.path.expanduser("~")
     _support = os.path.join(_home, "Library", "Application Support")
@@ -205,6 +227,17 @@ elif _SYSTEM == "Darwin":  # macOS
         os.path.join(_support, "Antigravity IDE", "User", "workspaceStorage"),
         os.path.join(_support, "antigravity", "User", "workspaceStorage"),
     )
+    _gemini_mac = os.path.join(_home, ".gemini")
+    _ALL_CONV_DIRS = [
+        os.path.join(_gemini_mac, "antigravity-ide", "conversations"),
+        os.path.join(_gemini_mac, "antigravity", "conversations"),
+        os.path.join(_gemini_mac, "antigravity-backup", "conversations"),
+    ]
+    _ALL_BRAIN_DIRS = [
+        os.path.join(_gemini_mac, "antigravity-ide", "brain"),
+        os.path.join(_gemini_mac, "antigravity", "brain"),
+        os.path.join(_gemini_mac, "antigravity-backup", "brain"),
+    ]
 else:  # Linux and other POSIX systems
     _home = os.path.expanduser("~")
     _config = os.path.join(_home, ".config")
@@ -225,8 +258,50 @@ else:  # Linux and other POSIX systems
         os.path.join(_config, "Antigravity IDE", "User", "workspaceStorage"),
         os.path.join(_config, "Antigravity", "User", "workspaceStorage"),
     )
+    _gemini_linux = os.path.join(_home, ".gemini")
+    _ALL_CONV_DIRS = [
+        os.path.join(_gemini_linux, "antigravity-ide", "conversations"),
+        os.path.join(_gemini_linux, "antigravity", "conversations"),
+        os.path.join(_gemini_linux, "antigravity-backup", "conversations"),
+    ]
+    _ALL_BRAIN_DIRS = [
+        os.path.join(_gemini_linux, "antigravity-ide", "brain"),
+        os.path.join(_gemini_linux, "antigravity", "brain"),
+        os.path.join(_gemini_linux, "antigravity-backup", "brain"),
+    ]
 
 BACKUP_FILENAME = "trajectorySummaries_backup.txt"
+
+
+def _find_brain_path(conversation_id):
+    """Return the first existing brain folder for this conversation across all locations."""
+    for brain_dir in _ALL_BRAIN_DIRS:
+        p = os.path.join(brain_dir, conversation_id)
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def _collect_all_conversations():
+    """
+    Merge conversation .pb files from all folders (new, old, backup).
+    Deduplicates by conversation ID — first seen wins (priority: new > old > backup).
+    Returns dict: {conversation_id: full_pb_path}
+    """
+    catalog = {}
+    for conv_dir in _ALL_CONV_DIRS:
+        if not os.path.isdir(conv_dir):
+            continue
+        try:
+            for name in os.listdir(conv_dir):
+                if not name.endswith(".pb"):
+                    continue
+                cid = name[:-3]
+                if cid not in catalog:
+                    catalog[cid] = os.path.join(conv_dir, name)
+        except Exception:
+            pass
+    return catalog
 
 
 # ─── Protobuf Varint Helpers ─────────────────────────────────────────────────
@@ -458,8 +533,8 @@ def infer_workspace_from_brain(conversation_id, known_ws_uris=None):
     Falls back to a heuristic depth-based approach if no known URIs match.
     Returns a filesystem path string, a remote URI string, or None.
     """
-    brain_path = os.path.join(BRAIN_DIR, conversation_id)
-    if not os.path.isdir(brain_path):
+    brain_path = _find_brain_path(conversation_id)
+    if not brain_path:
         return None
 
     # Two separate patterns: local file:/// and remote vscode-remote://
@@ -769,8 +844,8 @@ def get_title_from_brain(conversation_id):
     Try to extract a title from brain artifact .md files.
     Returns the first markdown heading found, or None.
     """
-    brain_path = os.path.join(BRAIN_DIR, conversation_id)
-    if not os.path.isdir(brain_path):
+    brain_path = _find_brain_path(conversation_id)
+    if not brain_path:
         return None
 
     for item in sorted(os.listdir(brain_path)):
@@ -788,7 +863,7 @@ def get_title_from_brain(conversation_id):
     return None
 
 
-def resolve_title(conversation_id, existing_titles):
+def resolve_title(conversation_id, existing_titles, pb_path=None):
     """
     Determine the best title for a conversation. Priority:
       1. Existing title from database (canonical Antigravity title)
@@ -805,8 +880,14 @@ def resolve_title(conversation_id, existing_titles):
     if brain_title:
         return brain_title, "brain"
 
-    conv_file = os.path.join(CONVERSATIONS_DIR, f"{conversation_id}.pb")
-    if os.path.exists(conv_file):
+    conv_file = pb_path
+    if not conv_file:
+        for conv_dir in _ALL_CONV_DIRS:
+            p = os.path.join(conv_dir, f"{conversation_id}.pb")
+            if os.path.exists(p):
+                conv_file = p
+                break
+    if conv_file and os.path.exists(conv_file):
         mod_time = time.strftime("%b %d", time.localtime(os.path.getmtime(conv_file)))
         return f"Conversation ({mod_time}) {conversation_id[:8]}", "fallback"
 
@@ -869,7 +950,7 @@ def build_trajectory_entry(conversation_id, title, existing_inner_data=None,
 def main():
     print()
     print("=" * 62)
-    print("   Antigravity Conversation Fix  v1.05")
+    print("   Antigravity Conversation Fix  v1.06")
     print("   Rebuilds your conversation index — sorted by date")
     print("=" * 62)
     print()
@@ -941,28 +1022,31 @@ def main():
         input("\n  Press Enter to close...")
         return 1
 
-    if not os.path.isdir(CONVERSATIONS_DIR):
-        print(f"  ERROR: Conversations directory not found at:")
-        print(f"    {CONVERSATIONS_DIR}")
-        input("\n  Press Enter to close...")
-        return 1
+    # ── Discover conversations (multi-folder merge with dedup) ───────────
 
-    # ── Discover conversations ──────────────────────────────────────────────
+    conv_catalog = _collect_all_conversations()
 
-    conv_files = [f for f in os.listdir(CONVERSATIONS_DIR) if f.endswith('.pb')]
-
-    if not conv_files:
+    if not conv_catalog:
         print("  No conversations found on disk. Nothing to fix.")
         input("\n  Press Enter to close...")
         return 0
 
-    conv_files.sort(
-        key=lambda f: os.path.getmtime(os.path.join(CONVERSATIONS_DIR, f)),
-        reverse=True
+    # Sort by modification time (newest first)
+    conversation_ids = sorted(
+        conv_catalog.keys(),
+        key=lambda cid: os.path.getmtime(conv_catalog[cid]),
+        reverse=True,
     )
-    conversation_ids = [f[:-3] for f in conv_files]
 
-    print(f"  Found {len(conversation_ids)} conversations on disk")
+    # Show folder scan summary
+    dir_counts = {}
+    for cid, pb_path in conv_catalog.items():
+        parent = os.path.dirname(pb_path)
+        dir_counts[parent] = dir_counts.get(parent, 0) + 1
+    for d, c in dir_counts.items():
+        folder_name = os.path.basename(os.path.dirname(d))  # antigravity-ide, antigravity, etc.
+        print(f"    {folder_name}: {c} conversation(s)")
+    print(f"  Found {len(conversation_ids)} unique conversations across all folders")
     print()
 
     # ── Preserve existing metadata ──────────────────────────────────────────
@@ -985,7 +1069,7 @@ def main():
     markers = {"brain": "+", "preserved": "~", "fallback": "?"}
 
     for i, cid in enumerate(conversation_ids, 1):
-        title, source = resolve_title(cid, existing_titles)
+        title, source = resolve_title(cid, existing_titles, conv_catalog.get(cid))
         inner_data = existing_inner_blobs.get(cid)
         has_ws = bool(inner_data and extract_workspace_hint(inner_data))
         resolved.append((cid, title, source, inner_data, has_ws))
@@ -1024,22 +1108,21 @@ def main():
         choice = input("  Your choice: ").strip()
 
         # Auto-infer from brain artifacts (both options do this)
-        if os.path.isdir(BRAIN_DIR):
-            print()
-            print("  Auto-assigning workspaces from brain artifacts...")
-            auto_count = 0
-            for idx, cid, title in unmapped:
-                inferred = infer_workspace_from_brain(cid, known_ws_uris)
-                if inferred and (_is_remote_uri(inferred) or os.path.isdir(inferred)):
-                    ws_assignments[cid] = inferred
-                    auto_count += 1
-                    display = os.path.basename(inferred) if not _is_remote_uri(inferred) else inferred
-                    print(f"    [{idx:3d}] -> {display}")
-            if auto_count:
-                print(f"  Auto-assigned {auto_count} workspace(s)")
-            else:
-                print("  No workspaces could be auto-detected.")
-            print()
+        print()
+        print("  Auto-assigning workspaces from brain artifacts...")
+        auto_count = 0
+        for idx, cid, title in unmapped:
+            inferred = infer_workspace_from_brain(cid, known_ws_uris)
+            if inferred and (_is_remote_uri(inferred) or os.path.isdir(inferred)):
+                ws_assignments[cid] = inferred
+                auto_count += 1
+                display = os.path.basename(inferred) if not _is_remote_uri(inferred) else inferred
+                print(f"    [{idx:3d}] -> {display}")
+        if auto_count:
+            print(f"  Auto-assigned {auto_count} workspace(s)")
+        else:
+            print("  No workspaces could be auto-detected.")
+        print()
 
         # Option 2: also do manual assignment for the rest
         if choice == '2':
@@ -1062,8 +1145,8 @@ def main():
 
     for cid, title, source, inner_data, has_ws in resolved:
         ws_path = ws_assignments.get(cid)
-        pb_path = os.path.join(CONVERSATIONS_DIR, f"{cid}.pb")
-        pb_mtime = os.path.getmtime(pb_path) if os.path.exists(pb_path) else None
+        pb_path = conv_catalog.get(cid)
+        pb_mtime = os.path.getmtime(pb_path) if pb_path and os.path.exists(pb_path) else None
 
         entry = build_trajectory_entry(cid, title, inner_data, ws_path, pb_mtime)
         result_bytes += encode_length_delimited(1, entry)

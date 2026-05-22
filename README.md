@@ -29,6 +29,7 @@ Your Antigravity conversation history disappeared? Conversations showing in the 
 | Remote workspaces (WSL/SSH/Docker) not recognized | ✅ Full `vscode-remote://` support *(v1.04+)* |
 | "Antigravity IDE" renamed folder not detected | ✅ Auto-detects both old and new paths *(v1.05+)* |
 | Antigravity IDE 2.x `antigravity-ide` data folder | ✅ Auto-detects all naming variants *(v1.05+)* |
+| Conversations split across multiple folders after upgrade | ✅ Multi-folder merge with dedup *(v1.06+)* |
 | Running from WSL requires manual file copying | ✅ Native WSL path detection *(v1.05+)* |
 | `python` command fails on macOS/Linux | ✅ Auto-detects Python 3, with built-in fallback *(v1.05+)* |
 
@@ -46,7 +47,7 @@ Antigravity stores conversation data in two places:
 | Linux | `~/.gemini/antigravity/` or `antigravity-ide/` | `~/.config/Antigravity IDE/.../state.vscdb` |
 | WSL | `~/.gemini/antigravity/` or `antigravity-ide/` | Auto-resolved from Windows `%APPDATA%` via `/mnt/c/` |
 
-> **Note:** The tool automatically detects all folder name variants — `antigravity`, `antigravity-ide`, `Antigravity`, and `Antigravity IDE` — across both the user profile and app data directories. No manual path changes needed.
+> **Note:** The tool automatically detects all folder name variants — `antigravity`, `antigravity-ide`, `antigravity-backup`, `Antigravity`, and `Antigravity IDE` — and merges conversations from all locations. Duplicates are automatically removed (newest location wins).
 
 When the index gets corrupted, conversations still exist on disk but don't show up in the sidebar. This tool scans your conversation files, sorts them by date, pulls titles from brain artifacts, and writes a clean index back to the database.
 
@@ -65,6 +66,11 @@ When the index gets corrupted, conversations still exist on disk but don't show 
 | `[WS]` | Workspace metadata preserved or recovered |
 
 ## Changelog
+
+### v1.06
+- **New:** **Multi-folder conversation merge** — scans `antigravity-ide`, `antigravity`, and `antigravity-backup` folders, merges all conversations with deduplication (newest folder wins). Users who upgraded from v1.x to v2.x no longer lose conversations that were only in the old or backup folder.
+- **New:** **Cross-folder brain search** — brain artifacts are now searched across all 3 folders, so title resolution and workspace inference work even when brain data is in a different folder than the conversation file.
+- **Non-destructive** — conversations are read in-place from all folders. No files are copied or moved.
 
 ### v1.05
 - **New:** **Antigravity IDE path support** — automatically detects both the old (`Antigravity`) and new (`Antigravity IDE`) folder names across Windows, macOS, and Linux. No manual configuration needed — the tool finds whichever version you have installed.
