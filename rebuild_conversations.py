@@ -57,7 +57,13 @@ import re
 import time
 import subprocess
 import platform
+import webbrowser
 from urllib.parse import quote, unquote
+from urllib.request import urlopen, Request
+
+_CURRENT_VERSION = "1.06"
+_GITHUB_REPO = "FutureisinPast/antigravity-conversation-fix"
+_RELEASES_URL = f"https://github.com/{_GITHUB_REPO}/releases/latest"
 
 # ─── Path Detection ──────────────────────────────────────────────────────────
 # Antigravity was renamed to "Antigravity IDE" in a recent update.
@@ -1017,15 +1023,58 @@ def build_trajectory_entry(conversation_id, title, existing_inner_data=None,
     return entry
 
 
+# ─── Update Check ─────────────────────────────────────────────────────────────
+
+def check_for_updates():
+    """
+    Check GitHub for a newer release. Non-blocking — silently returns
+    on any network error so offline users are not affected.
+    """
+    try:
+        api_url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+        req = Request(api_url, headers={"User-Agent": "AntigravityConversationFix"})
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tag = data.get("tag_name", "").lstrip("Vv")
+        if not tag:
+            return
+
+        # Simple numeric comparison (e.g. "1.06" vs "1.07")
+        try:
+            remote = tuple(int(x) for x in tag.split("."))
+            local = tuple(int(x) for x in _CURRENT_VERSION.split("."))
+        except ValueError:
+            return
+
+        if remote <= local:
+            return
+
+        print("  " + "*" * 58)
+        print(f"  UPDATE AVAILABLE: v{_CURRENT_VERSION} -> v{tag}")
+        print(f"  {_RELEASES_URL}")
+        print("  " + "*" * 58)
+        print()
+        choice = input("  Open download page in browser? (Y/n): ").strip().lower()
+        if choice in ("", "y", "yes"):
+            webbrowser.open(_RELEASES_URL)
+            print("  Opened in browser. You can continue or close this window.")
+        print()
+    except Exception:
+        pass  # No internet, API down, etc. — just continue silently
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     print()
     print("=" * 62)
-    print("   Antigravity Conversation Fix  v1.06")
+    print(f"   Antigravity Conversation Fix  v{_CURRENT_VERSION}")
     print("   Rebuilds your conversation index — sorted by date")
     print("=" * 62)
     print()
+
+    check_for_updates()
+
     print("  IMPORTANT: Close Antigravity completely before continuing.")
     print("  If it is open, this fix may be overwritten when the app exits.")
     print()
