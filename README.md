@@ -2,7 +2,7 @@
 
 Your Antigravity conversation history disappeared? Conversations showing in the wrong order? Titles replaced with placeholder text? Workspace assignments lost? This tool fixes all of that.
 
-## ⚡ Quick Start (Windows)
+##  Quick Start (Windows)
 
 1. **Close Antigravity** completely (File → Exit or kill from Task Manager)
 2. Download **`Antigravity_Conversation_Fix.exe`** from the [Releases](../../releases) page
