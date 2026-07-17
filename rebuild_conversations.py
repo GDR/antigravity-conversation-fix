@@ -941,13 +941,203 @@ def get_title_from_brain(conversation_id):
     return None
 
 
+def _clean_title_from_message(raw_msg):
+    """
+    Sanitize a raw user message into a display-friendly title.
+    Strips slash-commands, @-file references, XML tags, control chars,
+    and leading punctuation artifacts from protobuf parsing.
+    Returns a cleaned string capped at 80 chars, or None if nothing useful.
+    """
+    if not raw_msg:
+        return None
+
+    msg = raw_msg.strip()
+    # Unescape JSON string escapes (overview.txt stores escaped content)
+    msg = msg.replace('\\n', ' ').replace('\\t', ' ')
+
+    # Strip <USER_REQUEST> / <ADDITIONAL_METADATA> XML wrappers
+    msg = re.sub(r'</?USER_REQUEST>', '', msg)
+    msg = re.sub(r'<ADDITIONAL_METADATA>.*', '', msg, flags=re.DOTALL)
+    msg = re.sub(r'</?[A-Z_]+>', '', msg)
+
+    # Strip leading protobuf length-prefix artifacts (non-ASCII or control bytes
+    # that survived decode, plus common leading punctuation from binary parse)
+    msg = re.sub(r'^[^\x20-\x7e]+', '', msg)   # leading non-printable
+    # Leading digits, punctuation, and control chars from varint remnants
+    msg = re.sub(r'^[\s\d/\\*()\"?!#~`]+', '', msg)
+
+    # Strip @[file/path] references — not useful as titles
+    msg = re.sub(r'@\[[^\]]*\]', '', msg)
+    # Strip @directory: references
+    msg = re.sub(r'@\w+:[^\s]*', '', msg)
+
+    msg = msg.strip()
+
+    # Reject messages that are too short, pure commands, or test strings
+    if not msg or len(msg) < 3:
+        return None
+    lower = msg.lower()
+    if lower in ('test', 'test"', 'hi', 'hello', 'hey'):
+        return None
+    # Reject slash-commands that remained (e.g. "/caveman ultra")
+    if msg.startswith('/'):
+        return None
+    # Reject raw log lines / trajectory IDs
+    if msg.startswith('Trajectory ID:') or msg.startswith('202'):
+        return None
+    # Reject strings that are just file paths leaking from protobuf
+    if 'file:///' in msg[:20]:
+        return None
+    # Reject date-prefixed log lines (e.g. "-07-14 14:47:03.856 [info]")
+    if re.match(r'^-?\s*\d{2}[:-]\d{2}', msg):
+        return None
+    # Reject protobuf fragments: language identifiers + parens like "shellscript((:"
+    if len(msg) < 20 and re.search(r'[(){}]+[:(]|^[a-z]+\(', msg):
+        return None
+
+    # Take first sentence or first 80 chars, whichever is shorter
+    # Split on common sentence boundaries
+    for sep in ('\n', '. ', '? ', '! '):
+        idx = msg.find(sep)
+        if idx > 0 and idx < 80:
+            msg = msg[:idx + (0 if sep == '\n' else 1)]
+            break
+
+    return msg.strip()[:80] or None
+
+
+def get_title_from_conversation_db(conv_file_path):
+    """
+    Extract the first user message from a .db (SQLite) conversation file.
+    The steps table stores step_payload blobs; step_type 14 = user input.
+    Returns a cleaned title string, or None.
+    """
+    if not conv_file_path or not conv_file_path.endswith('.db'):
+        return None
+    try:
+        conn = sqlite3.connect(conv_file_path)
+        cur = conn.cursor()
+        # step_type 14 = user input in Antigravity's conversation schema
+        cur.execute(
+            'SELECT step_payload FROM steps '
+            'WHERE step_type=14 ORDER BY idx LIMIT 1'
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            return None
+
+        payload = row[0]
+        # Extract readable ASCII strings from the protobuf payload
+        strings = []
+        current = bytearray()
+        for b in payload:
+            if 0x20 <= b <= 0x7e:
+                current.append(b)
+            else:
+                if len(current) >= 5:
+                    strings.append(current.decode('ascii'))
+                current = bytearray()
+        if len(current) >= 5:
+            strings.append(current.decode('ascii'))
+
+        # Find the user message — skip UUIDs, file paths, metadata tokens
+        _uuid_re = re.compile(
+            r'^\$?[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+        )
+        for s in strings:
+            s = s.strip()
+            if len(s) < 5:
+                continue
+            if _uuid_re.match(s):
+                continue
+            if s.startswith(('file:///', '$', 'b$')):
+                continue
+            if s in ('main', 'true', 'false'):
+                continue
+            cleaned = _clean_title_from_message(s)
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
+    return None
+
+
+def get_title_from_transcript(conversation_id):
+    """
+    Extract the first user message from brain transcript logs.
+    Checks overview.txt (older format) and transcript.jsonl (newer format).
+    Returns a cleaned title string, or None.
+    """
+    brain_path = _find_brain_path(conversation_id)
+    if not brain_path:
+        return None
+
+    logs_dir = os.path.join(brain_path, '.system_generated', 'logs')
+    if not os.path.isdir(logs_dir):
+        return None
+
+    _user_req_re = re.compile(r'<USER_REQUEST>\s*\n?(.*?)(?:\n|<)', re.DOTALL)
+
+    # Strategy 1: transcript.jsonl (structured, preferred)
+    transcript = os.path.join(logs_dir, 'transcript.jsonl')
+    if os.path.exists(transcript):
+        try:
+            with open(transcript, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        if obj.get('type') != 'USER_INPUT':
+                            continue
+                        content = obj.get('content', '')
+                        # Extract from <USER_REQUEST> wrapper if present
+                        m = _user_req_re.search(content)
+                        raw = m.group(1) if m else content
+                        cleaned = _clean_title_from_message(raw)
+                        if cleaned:
+                            return cleaned
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+        except Exception:
+            pass
+
+    # Strategy 2: overview.txt (older format, line-based JSON entries)
+    overview = os.path.join(logs_dir, 'overview.txt')
+    if os.path.exists(overview):
+        try:
+            with open(overview, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read(16384)  # first 16KB is enough
+
+            # Find USER_INPUT entries and extract content
+            for m in re.finditer(
+                r'"type":"USER_INPUT".*?"content":"(.*?)(?:",|"\})',
+                content, re.DOTALL
+            ):
+                raw = m.group(1)
+                # Try <USER_REQUEST> extraction first
+                ur = _user_req_re.search(raw)
+                if ur:
+                    raw = ur.group(1)
+                cleaned = _clean_title_from_message(raw)
+                if cleaned:
+                    return cleaned
+        except Exception:
+            pass
+
+    return None
+
+
 def resolve_title(conversation_id, existing_titles, pb_path=None):
     """
     Determine the best title for a conversation. Priority:
       1. Existing title from database (canonical Antigravity title)
       2. Brain artifact .md heading (fallback for new/missing conversations)
-      3. Fallback: date + short UUID
-    Returns (title, source) where source is 'preserved', 'brain', or 'fallback'.
+      3. First user message from conversation .db file
+      4. First user message from brain transcript logs
+      5. Fallback: date + short UUID
+    Returns (title, source) where source is one of:
+      'preserved', 'brain', 'transcript', or 'fallback'.
     """
     # Prefer the canonical title Antigravity already has in the database
     if conversation_id in existing_titles:
@@ -957,6 +1147,16 @@ def resolve_title(conversation_id, existing_titles, pb_path=None):
     brain_title = get_title_from_brain(conversation_id)
     if brain_title:
         return brain_title, "brain"
+
+    # Try extracting first user message from conversation .db file
+    conv_title = get_title_from_conversation_db(pb_path)
+    if conv_title:
+        return conv_title, "transcript"
+
+    # Try extracting from brain transcript logs (works for .pb conversations too)
+    transcript_title = get_title_from_transcript(conversation_id)
+    if transcript_title:
+        return transcript_title, "transcript"
 
     conv_file = pb_path
     if not conv_file:
@@ -1197,8 +1397,8 @@ def main():
     print("  " + "-" * 58)
 
     resolved = []  # (cid, title, source, inner_data, has_ws)
-    stats = {"brain": 0, "preserved": 0, "fallback": 0}
-    markers = {"brain": "+", "preserved": "~", "fallback": "?"}
+    stats = {"brain": 0, "preserved": 0, "transcript": 0, "fallback": 0}
+    markers = {"brain": "+", "preserved": "~", "transcript": "*", "fallback": "?"}
 
     for i, cid in enumerate(conversation_ids, 1):
         title, source = resolve_title(cid, existing_titles, conv_catalog.get(cid))
@@ -1211,8 +1411,9 @@ def main():
         print(f"    [{i:3d}] {marker} {title[:50]}{ws_flag}")
 
     print("  " + "-" * 58)
-    print(f"  Legend: [+] brain  [~] preserved  [?] fallback  [WS] workspace")
-    print(f"  Totals: {stats['brain']} brain, {stats['preserved']} preserved, {stats['fallback']} fallback")
+    print(f"  Legend: [+] brain  [~] preserved  [*] transcript  [?] fallback  [WS] workspace")
+    print(f"  Totals: {stats['brain']} brain, {stats['preserved']} preserved, "
+          f"{stats['transcript']} transcript, {stats['fallback']} fallback")
     print()
 
     # ── Workspace assignment ───────────────────────────────────────────────
